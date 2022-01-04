@@ -67,7 +67,7 @@ bool publish_mesh = true;
 
 std::thread* bundlingThread;
 
-
+unsigned short* projectDepth_ushort = NULL; // 从voxel hashing投影出来的深度图
 // Functions
 /**
  * debug function
@@ -91,6 +91,34 @@ void ResetDepthSensing();
 
 bool CreateDevice();
 extern "C" void convertColorFloat4ToUCHAR4 ( uchar4* d_output, float4* d_input, unsigned int width, unsigned int height );
+
+
+unsigned int* classColorList = (unsigned int*)malloc(80 * 3 * sizeof(unsigned int));  // 类别颜色
+unsigned int* classColorList_gpu = NULL; // 存储每种类别的的颜色
+bool isGenerateClassColor = TRUE;
+void generateClassColor(){
+	int a = 1, b = 255;
+	srand((int)time(NULL));
+	for (int i = 0; i < 80 * 3; ++i)
+	{
+		classColorList[i] = a + rand() % (b - a + 1);
+	}
+
+
+	//for (int i = 0; i < 80 * 3; i++)
+	//{
+	//	classColorList[i] = rand() % 255+1;
+	//	//srand((int)time(NULL));
+	//	//classColorList[i] = rand() % 255 + 1;
+	//}
+	
+	// cudaMemcpy();
+	cudaMalloc((void **)&classColorList_gpu, 80 * 3 * sizeof(unsigned int));
+	cudaMemcpy(classColorList_gpu, classColorList, 80 * 3 * sizeof(unsigned int), cudaMemcpyHostToDevice);
+	free(classColorList);
+
+	isGenerateClassColor = FALSE;
+}
 
 /*************************BundleFusion SDK Interface ********************/
 bool initBundleFusion ( std::string app_config, std::string bundle_config )
@@ -151,7 +179,11 @@ bool initBundleFusion ( std::string app_config, std::string bundle_config )
 
 
 
-        if ( GlobalAppState::get().s_generateVideo ) g_transformWorld = GlobalAppState::get().s_topVideoTransformWorld;
+        if ( GlobalAppState::get().s_generateVideo ) 
+        {
+            std::cout<<"init transform world"<<std::endl;
+            g_transformWorld = GlobalAppState::get().s_topVideoTransformWorld;
+        }
     }
     catch ( const std::exception& e )
     {
@@ -181,6 +213,9 @@ bool processInputRGBDFrame ( cv::Mat& rgb, cv::Mat& depth )
         return false;
     }
 
+    	if (isGenerateClassColor)
+			generateClassColor();
+
     // Read Input
     ///////////////////////////////////////
 #ifdef RUN_MULTITHREADED
@@ -189,7 +224,7 @@ bool processInputRGBDFrame ( cv::Mat& rgb, cv::Mat& depth )
     {
         ConditionManager::waitImageManagerFrameReady ( ConditionManager::Recon );
     }
-    bool bGotDepth = g_imageManager->process ( rgb, depth );
+    bool bGotDepth = g_imageManager->process ( rgb, depth );//语义分割，下采样，高斯模糊
     if ( bGotDepth )
     {
         g_imageManager->setBundlingFrameRdy();					//ready for bundling thread
@@ -263,7 +298,14 @@ bool processInputRGBDFrame ( cv::Mat& rgb, cv::Mat& depth )
         std::chrono::steady_clock::time_point t3 = std::chrono::steady_clock::now();
         if ( validTransform && GlobalAppState::get().s_reconstructionEnabled )
         {
-            DepthCameraData depthCameraData ( g_imageManager->getIntegrateFrame ( frameIdx ).getDepthFrameGPU(), g_imageManager->getIntegrateFrame ( frameIdx ).getColorFrameGPU() );
+            // DepthCameraData depthCameraData ( g_imageManager->getIntegrateFrame ( frameIdx ).getDepthFrameGPU(), g_imageManager->getIntegrateFrame ( frameIdx ).getColorFrameGPU() );
+            // DepthCameraData(const float* depthData, const uchar4* colorData, const unsigned char* resultMasks_gpu, const short* resultMasks_Num_, const unsigned int* classColorList_gpu_, const float* scores_gpu_) 
+            DepthCameraData depthCameraData ( g_imageManager->getIntegrateFrame ( frameIdx ).getDepthFrameGPU(), 
+                                                                                             g_imageManager->getIntegrateFrame ( frameIdx ).getColorFrameGPU(), 
+                                                                                             g_imageManager->getIntegrateFrame ( frameIdx ).getMaskList(),
+                                                                                             g_imageManager->getIntegrateFrame ( frameIdx ).getMasks_Num(),
+                                                                                             classColorList_gpu,
+                                                                                             g_imageManager->getIntegrateFrame ( frameIdx ).getScores());
             integrate ( depthCameraData, transformation );
             g_bundler->getTrajectoryManager()->addFrame ( TrajectoryManager::TrajectoryFrame::Integrated, transformation, g_imageManager->getCurrFrameNumber() );
         }
@@ -283,6 +325,33 @@ bool processInputRGBDFrame ( cv::Mat& rgb, cv::Mat& depth )
             g_lastRigidTransform = transformation;
         }
     }
+
+    //get recasting depth
+    // g_rayCast.traverseCoarseGridSimpleSampleAll
+
+    // mat4f  transform =  g_transformWorld * g_lastRigidTransform;
+
+
+    std::cout<<"g_sceneRep->getNumIntegratedFrames():"<<g_sceneRep->getNumIntegratedFrames()<<std::endl;
+	// if (g_sceneRep->getNumIntegratedFrames() > 0) 
+    // {
+	// 	g_sceneRep->setLastRigidTransformAndCompactify(transform);	//TODO check that
+	// 	g_rayCast->render(g_sceneRep->getHashData(), g_sceneRep->getHashParams(), transform);
+	// 	RayCastData ReCast_data = g_rayCast->getRayCastData();  // YJ 添加
+	// 	RayCastParams ReCast_Param = g_rayCast->getRayCastParams();
+		
+	// 	projectDepth_ushort = (unsigned short*)malloc(g_depthCameraParams.m_imageWidth * g_depthCameraParams.m_imageHeight * sizeof(unsigned short));  // YJ
+	// 	cudaMemcpy(projectDepth_ushort, g_rayCast->getRayCastData().projectDepth_ushort, g_depthCameraParams.m_imageWidth * g_depthCameraParams.m_imageHeight * sizeof(unsigned short), cudaMemcpyDeviceToHost);
+    //     projectDepth_ushort = (unsigned short*)malloc(g_depthCameraParams.m_imageWidth * g_depthCameraParams.m_imageHeight * sizeof(unsigned short));  // YJ
+	//     cudaMemcpy(projectDepth_ushort, g_rayCast->getRayCastData().projectDepth_ushort, g_depthCameraParams.m_imageWidth * g_depthCameraParams.m_imageHeight * sizeof(unsigned short), cudaMemcpyDeviceToHost);
+	//     cv::Mat projectDepth_Mat(g_depthCameraParams.m_imageHeight, g_depthCameraParams.m_imageWidth, CV_16UC1, projectDepth_ushort);
+	//     cv::imwrite("projectDepth.png", projectDepth_Mat);
+	//     projectDepth_Mat.release();
+	//     free(projectDepth_ushort);
+    // }
+
+
+
 
 
     ///////////////////////////////////////////
@@ -381,6 +450,9 @@ bool processInputRGBDFrame ( cv::Mat& rgb, cv::Mat& depth )
     return true;
 
 }
+
+
+
 
 void setPublishRGBFlag ( bool publish_flag )
 {
@@ -584,6 +656,8 @@ bool CreateDevice()
     //g_rayCast = new CUDARayCastSDF(CUDARayCastSDF::parametersFromGlobalAppState(GlobalAppState::get(), g_imageManager->getColorIntrinsics(), g_CudaImageManager->getColorIntrinsicsInv()));
     g_rayCast = new CUDARayCastSDF ( CUDARayCastSDF::parametersFromGlobalAppState ( GlobalAppState::get(), g_imageManager->getDepthIntrinsics(), g_imageManager->getDepthIntrinsicsInv() ) );
 
+
+
     g_marchingCubesHashSDF = new CUDAMarchingCubesHashSDF ( CUDAMarchingCubesHashSDF::parametersFromGlobalAppState ( GlobalAppState::get() ) );
     g_historgram = new CUDAHistrogramHashSDF ( g_sceneRep->getHashParams() );
 
@@ -673,8 +747,6 @@ void deIntegrate ( const DepthCameraData& depthCameraData, const mat4f& transfor
     //}
 }
 
-
-
 void reintegrate()
 {
     const unsigned int maxPerFrameFixes = GlobalAppState::get().s_maxFrameFixes;
@@ -700,7 +772,14 @@ void reintegrate()
         if ( tm->getTopFromDeIntegrateList ( oldTransform, frameIdx ) )
         {
             auto& f = g_imageManager->getIntegrateFrame ( frameIdx );
-            DepthCameraData depthCameraData ( f.getDepthFrameGPU(), f.getColorFrameGPU() );
+            // DepthCameraData depthCameraData ( f.getDepthFrameGPU(), f.getColorFrameGPU() );
+            DepthCameraData depthCameraData ( f.getDepthFrameGPU(), 
+                                                                                             f.getColorFrameGPU(), 
+                                                                                             f.getMaskList(),
+                                                                                             f.getMasks_Num(),
+                                                                                             classColorList_gpu,
+                                                                                             f.getScores());
+
             MLIB_ASSERT ( !isnan ( oldTransform[0] ) && oldTransform[0] != -std::numeric_limits<float>::infinity() );
             deIntegrate ( depthCameraData, oldTransform );
             continue;
@@ -708,7 +787,13 @@ void reintegrate()
         else if ( tm->getTopFromIntegrateList ( newTransform, frameIdx ) )
         {
             auto& f = g_imageManager->getIntegrateFrame ( frameIdx );
-            DepthCameraData depthCameraData ( f.getDepthFrameGPU(), f.getColorFrameGPU() );
+            // DepthCameraData depthCameraData ( f.getDepthFrameGPU(), f.getColorFrameGPU() );
+            DepthCameraData depthCameraData ( f.getDepthFrameGPU(), 
+                                                                                             f.getColorFrameGPU(), 
+                                                                                             f.getMaskList(),
+                                                                                             f.getMasks_Num(),
+                                                                                             classColorList_gpu,
+                                                                                             f.getScores());
             MLIB_ASSERT ( !isnan ( newTransform[0] ) && newTransform[0] != -std::numeric_limits<float>::infinity() );
             integrate ( depthCameraData, newTransform );
             tm->confirmIntegration ( frameIdx );
@@ -717,7 +802,13 @@ void reintegrate()
         else if ( tm->getTopFromReIntegrateList ( oldTransform, newTransform, frameIdx ) )
         {
             auto& f = g_imageManager->getIntegrateFrame ( frameIdx );
-            DepthCameraData depthCameraData ( f.getDepthFrameGPU(), f.getColorFrameGPU() );
+            // DepthCameraData depthCameraData ( f.getDepthFrameGPU(), f.getColorFrameGPU() );
+            DepthCameraData depthCameraData ( f.getDepthFrameGPU(), 
+                                                                                             f.getColorFrameGPU(), 
+                                                                                             f.getMaskList(),
+                                                                                             f.getMasks_Num(),
+                                                                                             classColorList_gpu,
+                                                                                             f.getScores());
             MLIB_ASSERT ( !isnan ( oldTransform[0] ) && !isnan ( newTransform[0] ) && oldTransform[0] != -std::numeric_limits<float>::infinity() && newTransform[0] != -std::numeric_limits<float>::infinity() );
             deIntegrate ( depthCameraData, oldTransform );
             integrate ( depthCameraData, newTransform );
