@@ -4,11 +4,26 @@
 #include "CUDAImageCalibrator.h"
 #include "GlobalBundlingState.h"
 #include "TimingLog.h"
-
 #include <cuda_runtime.h>
+#include "maskrcnn.h"
+#include "gSLICrTools.h"
+
 
 class CUDAImageManager {
 public:
+	unsigned char* maskrcnnMask;
+	float* scores;
+	void setmaskrcnnMask(std::vector<std::pair<cv::Mat,BBoxInfo>> &results)
+	{
+		short resultMasks_Num_cpu = (short)results.size();
+		maskrcnnMask =  (unsigned char*)malloc(resultMasks_Num_cpu*sizeof(unsigned char)*320*240);
+		 scores = (float*)malloc(resultMasks_Num_cpu*sizeof(float));
+		for(int i =0 ;i<resultMasks_Num_cpu;i++)
+		{
+			memcpy(maskrcnnMask+i*320*240, results[i].first.data,sizeof(unsigned char)*320*240);
+			memcpy(scores+i, &(results[i].second.prob), sizeof(float));
+		}
+	}
 
 	class ManagedRGBDInputFrame {
 	public:
@@ -61,11 +76,20 @@ public:
 			if (s_bIsOnGPU) {
 				MLIB_CUDA_SAFE_FREE(m_depthIntegration);
 				MLIB_CUDA_SAFE_FREE(m_colorIntegration);
+
+
 			}
 			else {
 				SAFE_DELETE_ARRAY(m_depthIntegration);
 				SAFE_DELETE_ARRAY(m_colorIntegration);
 			}
+
+			// SAFE_DELETE_ARRAY(resultMasks_cpu);
+			// SAFE_DELETE_ARRAY(resultMasks_Num_cpu);
+			// SAFE_DELETE_ARRAY(scores_cpu);
+			MLIB_CUDA_SAFE_FREE(resultMasks_Num_gpu);
+			MLIB_CUDA_SAFE_FREE(resultMasks_gpu);
+			MLIB_CUDA_SAFE_FREE(scores_gpu);
 		}
 
 
@@ -122,9 +146,73 @@ public:
 			}
 		}
 
+		//-----------------YJ-----------------------------
+		// 获取当前帧RGB在GPU上全部的mask
+		const unsigned char* getMaskList(){
+			return resultMasks_gpu;
+		}
+
+		const short* getMasks_Num(){
+			return resultMasks_Num_gpu;
+		}
+
+		const float* getScores(){
+			return scores_gpu;
+		}
+
+		// void setScores(const float* scores_){
+		// 	scores = scores_;
+		// }
+
+		// void setmask(std::vector<std::pair<cv::Mat,BBoxInfo>> &results)
+		// {
+		// 	short resultMasks_Num_cpu = (short)results.size();
+		// 	unsigned char* resultMasks_cpu =  (unsigned char*)malloc(resultMasks_Num_cpu*sizeof(unsigned char)*320*240);
+		// 	float* scores_cpu = (float*)malloc(resultMasks_Num_cpu*sizeof(float));
+
+		// 	for(int i =0 ;i<resultMasks_Num_cpu;i++)
+		// 	{
+		// 		memcpy(resultMasks_cpu+i*320*240, results[i].first.data,sizeof(unsigned char)*320*240);
+		// 		memcpy(scores_cpu+i, &(results[i].second.prob), sizeof(float));
+		// 	}
+		// 	cudaMalloc(&resultMasks_Num_gpu, sizeof(short));
+		// 	cudaMemcpy(resultMasks_Num_gpu, &resultMasks_Num_cpu,sizeof(short), cudaMemcpyHostToDevice);
+		
+		// 	if(resultMasks_Num_cpu!=0)
+		// 	{
+		// 		cudaMalloc(&resultMasks_gpu, sizeof(unsigned char)*320*240*resultMasks_Num_cpu);
+		// 		cudaMemcpy(resultMasks_gpu,resultMasks_cpu,sizeof(unsigned char)*320*240*resultMasks_Num_cpu,cudaMemcpyHostToDevice);
+
+		// 		cudaMalloc(&scores_gpu, sizeof(unsigned char)*320*240*resultMasks_Num_cpu);
+		// 		cudaMemcpy(scores_gpu,scores_cpu,sizeof(float)*resultMasks_Num_cpu,cudaMemcpyHostToDevice);
+		// 	}
+			
+		// }
+
+		void setmasknew(short resultMasks_Num_cpu,  unsigned char* resultMasks_cpu, float* scores_cpu)
+		{
+			cudaMalloc(&resultMasks_Num_gpu, sizeof(short));
+			cudaMemcpy(resultMasks_Num_gpu, &resultMasks_Num_cpu,sizeof(short), cudaMemcpyHostToDevice);
+
+			cudaMalloc(&resultMasks_gpu, sizeof(unsigned char)*320*240*resultMasks_Num_cpu);
+			cudaMemcpy(resultMasks_gpu,resultMasks_cpu,sizeof(unsigned char)*320*240*resultMasks_Num_cpu,cudaMemcpyHostToDevice);
+
+			cudaMalloc(&scores_gpu, sizeof(unsigned char)*320*240*resultMasks_Num_cpu);
+			cudaMemcpy(scores_gpu,scores_cpu,sizeof(float)*resultMasks_Num_cpu,cudaMemcpyHostToDevice);
+		}
+
+
 	private:
 		float*	m_depthIntegration;	//either on the GPU or CPU
 		uchar4*	m_colorIntegration;	//either on the GPU or CPU
+
+		unsigned char* resultMasks_gpu;  //当前帧rgb的在GPU上的全部mask
+		short*  resultMasks_Num_gpu; //一帧rgb中实例mask的个数
+		float* scores_gpu;  //当前rgb的每个mask的概率
+
+		// unsigned char* resultMasks_gpu;  //当前帧rgb的在GPU上的全部mask
+		// short*  resultMasks_Num_gpu; //一帧rgb中实例mask的个数
+		// float* scores_gpu;  //当前rgb的每个mask的概率
 
 		static bool			s_bIsOnGPU;
 		static unsigned int s_width;
@@ -158,7 +246,6 @@ public:
 		MLIB_CUDA_SAFE_CALL(cudaMalloc(&d_colorInput, sizeof(uchar4)*bufferDimColorInput));
 
 		m_currFrame = 0;
-
 
 		const unsigned int rgbdSensorWidthDepth = m_RGBDSensor->getDepthWidth();
 		const unsigned int rgbdSensorHeightDepth = m_RGBDSensor->getDepthHeight();
@@ -195,13 +282,25 @@ public:
 
 		ManagedRGBDInputFrame::globalInit(getIntegrationWidth(), getIntegrationHeight(), storeFramesOnGPU);
 		m_bHasBundlingFrameRdy = false;
-	}
 
-/*	HRESULT OnD3D11CreateDevice(ID3D11Device* device) {
-		HRESULT hr = S_OK;
-		V_RETURN(m_imageCalibrator.OnD3D11CreateDevice(device, m_RGBDSensor->getDepthWidth(), m_RGBDSensor->getDepthHeight()));
-		return hr;
-	}*/
+		maskrcnnParams.dataDirs.push_back("data/maskrcnn/1024");
+    	maskrcnnParams.inputTensorNames.push_back(MaskRCNNConfig::MODEL_INPUT);
+    	maskrcnnParams.batchSize = 1;
+    	maskrcnnParams.outputTensorNames.push_back(MaskRCNNConfig::MODEL_OUTPUTS[0]);
+    	maskrcnnParams.outputTensorNames.push_back(MaskRCNNConfig::MODEL_OUTPUTS[1]);
+    	maskrcnnParams.dlaCore = -1;
+    	maskrcnnParams.int8 = false;
+    	maskrcnnParams.fp16 = true;
+    	maskrcnnParams.uffFileName = MaskRCNNConfig::MODEL_NAME;
+    	maskrcnnParams.maskThreshold = MaskRCNNConfig::MASK_THRESHOLD;
+
+		//初始化maskrcnn
+		maskrcnn.init(maskrcnnParams);
+		maskrcnn.build(engine_path,true);
+
+		slicTools.initCameraIntrinsics(m_depthIntrinsics(0, 2),m_depthIntrinsics(1, 2),m_depthIntrinsics(0, 0),m_depthIntrinsics(1, 1));
+
+	}
 
 	~CUDAImageManager() {
 		reset();
@@ -209,10 +308,8 @@ public:
 		MLIB_CUDA_SAFE_FREE(d_depthInputRaw);
 		MLIB_CUDA_SAFE_FREE(d_depthInputFiltered);
 		MLIB_CUDA_SAFE_FREE(d_colorInput);
-
-		//m_imageCalibrator.OnD3D11DestroyDevice();
-
 		ManagedRGBDInputFrame::globalFree();
+		maskrcnn.teardown();
 	}
 
 	void reset() {
@@ -230,7 +327,7 @@ public:
 		MLIB_CUDA_SAFE_CALL(cudaMemcpy(d_color, d_colorInput, sizeof(uchar4)*m_RGBDSensor->getColorWidth()*m_RGBDSensor->getColorHeight(), cudaMemcpyDeviceToDevice));
 	}
 
-
+	void maskSuperPixelFilter_OverSeg(int spNum, int *finalSPixel, int resultMasks_Num);
 	//TODO not const because direct assignment in SiftGPU
 	//float* getIntensityImageSIFT() {
 	//	return d_intensitySIFT;
@@ -307,6 +404,9 @@ public:
 	void confirmRdyBundlingFrame() {
 		m_bHasBundlingFrameRdy = false;
 	}
+
+
+
 private:
 	bool m_bHasBundlingFrameRdy;
 
@@ -329,14 +429,18 @@ private:
 	float*	d_depthInputRaw;
 	uchar4*	d_colorInput;
 	float*	d_depthInputFiltered;
-
 	unsigned int m_widthSIFTdepth;
 	unsigned int m_heightSIFTdepth;
-
 	//! all image data on the GPU
 	std::vector<ManagedRGBDInputFrame> m_data;
-
 	unsigned int m_currFrame;
-
 	static Timer s_timer;
+
+	SampleMaskRCNNParams maskrcnnParams;
+	SampleMaskRCNN maskrcnn;
+	std::string engine_path = "./weight/maskrcnn_fp16_512.bin";	
+	gSLICrTools slicTools;
+	int finalSPixel[320 * 240];		// 存最终RGBD超像素分割结果
+	
 };
+
